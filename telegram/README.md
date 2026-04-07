@@ -21,7 +21,7 @@ Telegram channel plugin for Claude Code with Markdown to HTML conversion.
 ## Installation
 
 ```bash
-/plugin install telegram@claude-plugins-unofficial
+/plugin install telegram@weaming-plugins
 /reload-plugins
 ```
 
@@ -36,7 +36,7 @@ Telegram channel plugin for Claude Code with Markdown to HTML conversion.
 Restart Claude Code with:
 
 ```bash
-claude --channels plugin:telegram@claude-plugins-unofficial
+claude --channels plugin:telegram@weaming-plugins
 ```
 
 ## Pair Your Account
@@ -49,5 +49,5 @@ claude --channels plugin:telegram@claude-plugins-unofficial
 ## Upgrading
 
 ```bash
-/plugin marketplace update claude-plugins-unofficial
+/plugin marketplace update weaming-plugins
 ```

@@ -1,6 +1,6 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "claude-plugins-unofficial",
+  "name": "weaming-plugins",
   "description": "Custom plugins for Claude Code - unofficial marketplace",
   "owner": {
     "name": "weaming"
