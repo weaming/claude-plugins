@@ -1,4 +1,4 @@
-# Telegram Plugin (Unofficial)
+# Telegram Plugin
 
 Telegram channel plugin for Claude Code with Markdown to HTML conversion.
 
@@ -20,49 +20,34 @@ Telegram channel plugin for Claude Code with Markdown to HTML conversion.
 
 ## Installation
 
-### 1. Add as MCP server
-
 ```bash
-claude mcp add telegram-unofficial \
-  -e TELEGRAM_BOT_TOKEN=your_token \
-  -e TELEGRAM_STATE_DIR=~/.claude/channels/telegram \
-  -e TELEGRAM_ACCESS_MODE=pairing \
-  -- bun run --cwd $PLUGIN_DIR --shell=bun --silent start
+/plugin install telegram@weaming-claude-plugins-unofficial
+/reload-plugins
 ```
 
-### 2. Enable channel on startup
+## Configuration
 
 ```bash
-claude --channels telegram-unofficial
+/telegram:configure <token>
 ```
 
-Or add to your shell profile/aliases:
+## Enable Channel
+
+Restart Claude Code with:
 
 ```bash
-alias claude-tg='claude --channels telegram-unofficial'
+claude --channels plugin:telegram@weaming-claude-plugins-unofficial
 ```
 
-### 3. Pair your account
+## Pair Your Account
 
 1. Open Telegram and send any message to your bot
 2. The bot will reply with a pairing code
 3. In Claude Code, run: `/telegram:access pair <code>`
 4. Lock down access: `/telegram:access policy allowlist`
 
-## Configuration
-
-| Environment Variable | Description |
-|---------------------|-------------|
-| `TELEGRAM_BOT_TOKEN` | Your Telegram bot token from @BotFather |
-| `TELEGRAM_STATE_DIR` | Directory for access control and state (default: `~/.claude/channels/telegram`) |
-| `TELEGRAM_ACCESS_MODE` | `pairing` (default), `allowlist`, or `disabled` |
-
 ## Upgrading
 
 ```bash
-cd /path/to/claude-plugins/telegram
-git pull
-bun install
+/plugin marketplace update weaming-claude-plugins-unofficial
 ```
-
-Then restart Claude Code.

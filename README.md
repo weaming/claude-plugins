@@ -8,9 +8,25 @@ Unofficial plugin marketplace for Claude Code.
 |--------|-------------|
 | [telegram](./telegram/) | Telegram channel with Markdown to HTML conversion |
 
-## Adding New Plugins
+## Installation
 
-1. Create a subdirectory for your plugin
-2. Add plugin manifest at `plugin-name/.claude-plugin/plugin.json`
-3. Add your code and dependencies
-4. Update this README to list your plugin
+```bash
+# Add this marketplace
+/plugin marketplace add weaming/claude-plugins-unofficial
+
+# Install a plugin
+/plugin install telegram@weaming-claude-plugins-unofficial
+```
+
+## Plugin Structure
+
+Each plugin follows the standard Claude Code plugin structure:
+
+```
+plugin-name/
+├── .claude-plugin/
+│   └── plugin.json      # Plugin metadata (required)
+├── .mcp.json            # MCP server configuration
+├── commands/            # Slash commands (optional)
+└── README.md            # Documentation
+```
