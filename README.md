@@ -1,6 +1,6 @@
-# Claude Plugins
+# Claude Plugins Unofficial
 
-Custom plugins for Claude Code with enhancements not available in the official marketplace.
+Unofficial plugin marketplace for Claude Code.
 
 ## Available Plugins
 
