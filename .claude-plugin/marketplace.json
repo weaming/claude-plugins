@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "weaming-plugins",
+  "description": "Custom plugins for Claude Code by weaming",
+  "owner": {
+    "name": "weaming"
+  },
+  "plugins": [
+    {
+      "name": "telegram-unofficial",
+      "description": "Telegram channel plugin for Claude Code with Markdown to HTML conversion",
+      "version": "1.0.0",
+      "source": "./telegram",
+      "category": "communication",
+      "homepage": "https://github.com/weaming/claude-plugins"
+    }
+  ]
+}
