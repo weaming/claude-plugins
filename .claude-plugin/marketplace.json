@@ -7,10 +7,10 @@
   },
   "plugins": [
     {
-      "name": "telegram",
+      "name": "telegram-unofficial",
       "description": "Telegram channel plugin for Claude Code with Markdown to HTML conversion",
       "version": "1.0.0",
-      "source": "./telegram",
+      "source": "./telegram-unofficial",
       "category": "communication",
       "homepage": "https://github.com/weaming/claude-plugins-unofficial"
     }

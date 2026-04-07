@@ -497,7 +497,7 @@ function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[
 const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp'])
 
 const mcp = new Server(
-  { name: 'telegram', version: '1.0.0' },
+  { name: 'telegram-unofficial', version: '1.0.0' },
   {
     capabilities: {
       tools: {},

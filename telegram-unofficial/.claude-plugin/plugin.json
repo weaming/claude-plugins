@@ -1,5 +1,5 @@
 {
-  "name": "telegram",
+  "name": "telegram-unofficial",
   "description": "Telegram channel plugin for Claude Code - with Markdown to HTML conversion",
   "version": "1.0.0",
   "author": {
