@@ -598,7 +598,7 @@ function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[
 const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp'])
 
 const mcp = new Server(
-  { name: 'tgchannel', version: '1.1.1' },
+  { name: 'tgchannel', version: '1.2.0' },
   {
     capabilities: {
       tools: {},
@@ -744,11 +744,14 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 mcp.setRequestHandler(CallToolRequestSchema, async req => {
   const args = (req.params.arguments ?? {}) as Record<string, unknown>
+  log(`telegram channel: ← claude call tool=${req.params.name} args_keys=${Object.keys(args).join(',')}\n`)
+
+  let result: { content: { type: 'text'; text: string }[]; isError?: boolean } | undefined
 
   // telegram_status works in any mode — must be before the standby guard
   if (req.params.name === 'telegram_status') {
     const leader = readPidFile()
-    return {
+    result = {
       content: [{
         type: 'text',
         text: isLeader
@@ -757,147 +760,155 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       }],
     }
   }
-
   // Standby instances cannot send Telegram messages — only the leader polls
-  if (!isLeader) {
+  else if (!isLeader) {
     const pid = readPidFile()?.pid
-    return {
+    result = {
       content: [{ type: 'text', text: `Telegram is handled by another session (PID ${pid ?? 'unknown'}). Reply unavailable.` }],
       isError: true,
     }
   }
+  else {
+    try {
+      switch (req.params.name) {
+        case 'reply': {
+          const chat_id = args.chat_id as string
+          const text = args.text as string
+          const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
+          const files = (args.files as string[] | undefined) ?? []
+          const format = (args.format as string | undefined) ?? 'markdown'
 
-  try {
-    switch (req.params.name) {
-      case 'reply': {
-        const chat_id = args.chat_id as string
-        const text = args.text as string
-        const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
-        const files = (args.files as string[] | undefined) ?? []
-        const format = (args.format as string | undefined) ?? 'markdown'
+          let parseMode: 'HTML' | 'MarkdownV2' | undefined
+          let processedText = text
 
-        let parseMode: 'HTML' | 'MarkdownV2' | undefined
-        let processedText = text
-
-        if (format === 'markdown') {
-          parseMode = 'HTML'
-          processedText = convertMarkdownToTelegramHtml(text)
-        } else if (format === 'html') {
-          parseMode = 'HTML'
-        }
-
-        assertAllowedChat(chat_id)
-
-        for (const f of files) {
-          assertSendable(f)
-          const st = statSync(f)
-          if (st.size > MAX_ATTACHMENT_BYTES) {
-            throw new Error(`file too large: ${f} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`)
+          if (format === 'markdown') {
+            parseMode = 'HTML'
+            processedText = convertMarkdownToTelegramHtml(text)
+          } else if (format === 'html') {
+            parseMode = 'HTML'
           }
-        }
 
-        const access = loadAccess()
-        const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
-        const mode = access.chunkMode ?? 'length'
-        const replyMode = access.replyToMode ?? 'first'
-        const chunks = chunk(processedText, limit, mode)
-        const sentIds: number[] = []
+          assertAllowedChat(chat_id)
 
-        try {
-          for (let i = 0; i < chunks.length; i++) {
-            const shouldReplyTo =
-              reply_to != null &&
-              replyMode !== 'off' &&
-              (replyMode === 'all' || i === 0)
-            const sent = await bot.api.sendMessage(chat_id, chunks[i], {
-              ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
-              ...(parseMode ? { parse_mode: parseMode } : {}),
-            })
-            sentIds.push(sent.message_id)
+          for (const f of files) {
+            assertSendable(f)
+            const st = statSync(f)
+            if (st.size > MAX_ATTACHMENT_BYTES) {
+              throw new Error(`file too large: ${f} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`)
+            }
           }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          throw new Error(
-            `reply failed after ${sentIds.length} of ${chunks.length} chunk(s) sent: ${msg}`,
+
+          const access = loadAccess()
+          const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
+          const mode = access.chunkMode ?? 'length'
+          const replyMode = access.replyToMode ?? 'first'
+          const chunks = chunk(processedText, limit, mode)
+          const sentIds: number[] = []
+
+          try {
+            for (let i = 0; i < chunks.length; i++) {
+              const shouldReplyTo =
+                reply_to != null &&
+                replyMode !== 'off' &&
+                (replyMode === 'all' || i === 0)
+              const sent = await bot.api.sendMessage(chat_id, chunks[i], {
+                ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
+                ...(parseMode ? { parse_mode: parseMode } : {}),
+              })
+              sentIds.push(sent.message_id)
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err)
+            throw new Error(
+              `reply failed after ${sentIds.length} of ${chunks.length} chunk(s) sent: ${msg}`,
+            )
+          }
+
+          // Files go as separate messages (Telegram doesn't mix text+file in one
+          // sendMessage call). Thread under reply_to if present.
+          for (const f of files) {
+            const ext = extname(f).toLowerCase()
+            const input = new InputFile(f)
+            const opts = reply_to != null && replyMode !== 'off'
+              ? { reply_parameters: { message_id: reply_to } }
+              : undefined
+            if (PHOTO_EXTS.has(ext)) {
+              const sent = await bot.api.sendPhoto(chat_id, input, opts)
+              sentIds.push(sent.message_id)
+            } else {
+              const sent = await bot.api.sendDocument(chat_id, input, opts)
+              sentIds.push(sent.message_id)
+            }
+          }
+
+          const replyResult =
+            sentIds.length === 1
+              ? `sent (id: ${sentIds[0]})`
+              : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
+          log(`telegram channel: → sent ${sentIds.length} msg(s) to ${chat_id}${reply_to ? ` (reply_to ${reply_to})` : ''}\n`)
+          result = { content: [{ type: 'text', text: replyResult }] }
+          break
+        }
+        case 'react': {
+          assertAllowedChat(args.chat_id as string)
+          await bot.api.setMessageReaction(args.chat_id as string, Number(args.message_id), [
+            { type: 'emoji', emoji: args.emoji as ReactionTypeEmoji['emoji'] },
+          ])
+          result = { content: [{ type: 'text', text: 'reacted' }] }
+          break
+        }
+        case 'download_attachment': {
+          const file_id = args.file_id as string
+          const file = await bot.api.getFile(file_id)
+          if (!file.file_path) throw new Error('Telegram returned no file_path — file may have expired')
+          const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
+          const res = await fetch(url)
+          if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`)
+          const buf = Buffer.from(await res.arrayBuffer())
+          // file_path is from Telegram (trusted), but strip to safe chars anyway
+          // so nothing downstream can be tricked by an unexpected extension.
+          const rawExt = file.file_path.includes('.') ? file.file_path.split('.').pop()! : 'bin'
+          const ext = rawExt.replace(/[^a-zA-Z0-9]/g, '') || 'bin'
+          const uniqueId = (file.file_unique_id ?? '').replace(/[^a-zA-Z0-9_-]/g, '') || 'dl'
+          const path = join(INBOX_DIR, `${Date.now()}-${uniqueId}.${ext}`)
+          mkdirSync(INBOX_DIR, { recursive: true })
+          writeFileSync(path, buf)
+          result = { content: [{ type: 'text', text: path }] }
+          break
+        }
+        case 'edit_message': {
+          assertAllowedChat(args.chat_id as string)
+          const editFormat = (args.format as string | undefined) ?? 'markdown'
+          const editText = editFormat === 'markdown'
+            ? convertMarkdownToTelegramHtml(args.text as string)
+            : args.text as string
+          const edited = await bot.api.editMessageText(
+            args.chat_id as string,
+            Number(args.message_id),
+            editText,
+            { parse_mode: 'HTML' as const },
           )
+          const id = typeof edited === 'object' ? edited.message_id : args.message_id
+          result = { content: [{ type: 'text', text: `edited (id: ${id})` }] }
+          break
         }
-
-        // Files go as separate messages (Telegram doesn't mix text+file in one
-        // sendMessage call). Thread under reply_to if present.
-        for (const f of files) {
-          const ext = extname(f).toLowerCase()
-          const input = new InputFile(f)
-          const opts = reply_to != null && replyMode !== 'off'
-            ? { reply_parameters: { message_id: reply_to } }
-            : undefined
-          if (PHOTO_EXTS.has(ext)) {
-            const sent = await bot.api.sendPhoto(chat_id, input, opts)
-            sentIds.push(sent.message_id)
-          } else {
-            const sent = await bot.api.sendDocument(chat_id, input, opts)
-            sentIds.push(sent.message_id)
+        default:
+          result = {
+            content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }],
+            isError: true,
           }
-        }
-
-        const result =
-          sentIds.length === 1
-            ? `sent (id: ${sentIds[0]})`
-            : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
-        return { content: [{ type: 'text', text: result }] }
       }
-      case 'react': {
-        assertAllowedChat(args.chat_id as string)
-        await bot.api.setMessageReaction(args.chat_id as string, Number(args.message_id), [
-          { type: 'emoji', emoji: args.emoji as ReactionTypeEmoji['emoji'] },
-        ])
-        return { content: [{ type: 'text', text: 'reacted' }] }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      result = {
+        content: [{ type: 'text', text: `${req.params.name} failed: ${msg}` }],
+        isError: true,
       }
-      case 'download_attachment': {
-        const file_id = args.file_id as string
-        const file = await bot.api.getFile(file_id)
-        if (!file.file_path) throw new Error('Telegram returned no file_path — file may have expired')
-        const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
-        const res = await fetch(url)
-        if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`)
-        const buf = Buffer.from(await res.arrayBuffer())
-        // file_path is from Telegram (trusted), but strip to safe chars anyway
-        // so nothing downstream can be tricked by an unexpected extension.
-        const rawExt = file.file_path.includes('.') ? file.file_path.split('.').pop()! : 'bin'
-        const ext = rawExt.replace(/[^a-zA-Z0-9]/g, '') || 'bin'
-        const uniqueId = (file.file_unique_id ?? '').replace(/[^a-zA-Z0-9_-]/g, '') || 'dl'
-        const path = join(INBOX_DIR, `${Date.now()}-${uniqueId}.${ext}`)
-        mkdirSync(INBOX_DIR, { recursive: true })
-        writeFileSync(path, buf)
-        return { content: [{ type: 'text', text: path }] }
-      }
-      case 'edit_message': {
-        assertAllowedChat(args.chat_id as string)
-        const editFormat = (args.format as string | undefined) ?? 'markdown'
-        const editText = editFormat === 'markdown'
-          ? convertMarkdownToTelegramHtml(args.text as string)
-          : args.text as string
-        const edited = await bot.api.editMessageText(
-          args.chat_id as string,
-          Number(args.message_id),
-          editText,
-          { parse_mode: 'HTML' as const },
-        )
-        const id = typeof edited === 'object' ? edited.message_id : args.message_id
-        return { content: [{ type: 'text', text: `edited (id: ${id})` }] }
-      }
-      default:
-        return {
-          content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }],
-          isError: true,
-        }
-    }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    return {
-      content: [{ type: 'text', text: `${req.params.name} failed: ${msg}` }],
-      isError: true,
     }
   }
+
+  log(`telegram channel: → claude response tool=${req.params.name} isError=${!!result.isError} text=${result.content[0]?.text.slice(0, 80)}\n`)
+  return result
 })
 
 await mcp.connect(new StdioServerTransport())
@@ -1033,6 +1044,7 @@ bot.on('callback_query:data', async ctx => {
     method: 'notifications/claude/channel/permission',
     params: { request_id, behavior },
   })
+  log(`telegram channel: → claude permission ${behavior} request_id=${request_id}\n`)
   pendingPermissions.delete(request_id)
   const label = behavior === 'allow' ? '✅ Allowed' : '❌ Denied'
   await ctx.answerCallbackQuery({ text: label }).catch(() => {})
@@ -1193,6 +1205,7 @@ async function handleInbound(
         behavior: permMatch[1]!.toLowerCase().startsWith('y') ? 'allow' : 'deny',
       },
     })
+    log(`telegram channel: → claude permission ${permMatch[1]!.toLowerCase().startsWith('y') ? 'allow' : 'deny'} request_id=${permMatch[2]!.toLowerCase()} (reply)\n`)
     if (msgId != null) {
       const emoji = permMatch[1]!.toLowerCase().startsWith('y') ? '✅' : '❌'
       void bot.api.setMessageReaction(chat_id, msgId, [
@@ -1201,6 +1214,9 @@ async function handleInbound(
     }
     return
   }
+
+  const ts = new Date((ctx.message?.date ?? 0) * 1000).toISOString()
+  log(`telegram channel: ← msg ${msgId} from ${from.username ?? from.id} chat ${chat_id} len=${text.length}${attachment ? ` [${attachment.kind}]` : ''} at ${ts}\n`)
 
   // Typing indicator — signals "processing" until we reply (or ~5s elapses).
   void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
@@ -1220,6 +1236,7 @@ async function handleInbound(
 
   // image_path goes in meta only — an in-content "[image attached — read: PATH]"
   // annotation is forgeable by any allowlisted sender typing that string.
+  log(`telegram channel: → claude inbound chat=${chat_id} msg=${msgId ?? '-'} user=${from.username ?? from.id} len=${text.length}\n`)
   mcp.notification({
     method: 'notifications/claude/channel',
     params: {
@@ -1248,7 +1265,9 @@ async function handleInbound(
 // Without this, any throw in a message handler stops polling permanently
 // (grammy's default error handler calls bot.stop() and rethrows).
 bot.catch(err => {
-  log(`telegram channel: handler error (polling continues): ${err.error}\n`)
+  const msg = err?.error?.message ?? String(err)
+  const isNet = /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ENETUNREACH|SOCKET|HTTPError|fetch/i.test(msg)
+  log(`telegram channel: handler error${isNet ? ' [net]' : ''} (polling continues): ${msg}\n`)
 })
 
 // Leader election: check if another instance is polling before starting
