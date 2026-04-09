@@ -198,6 +198,87 @@ if (!TOKEN) {
 }
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 
+// --- Leader Election (multi-instance protection) ---
+const PID_DIR = join(homedir(), '.config', 'mcp')
+const PID_FILE = join(PID_DIR, 'telegram-channel.pid')
+const LEADER_CHECK_INTERVAL_MS = 60_000   // 60s between leader liveness checks
+const ELECTION_RANDOM_MS = [1000, 3000]  // 1-3s random backoff
+
+type PidRecord = {
+  pid: number
+  ts: number
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(r => setTimeout(r, ms))
+}
+
+function randomBetween(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min
+}
+
+function readPidFile(): PidRecord | null {
+  try {
+    return JSON.parse(readFileSync(PID_FILE, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+function writePidFile(): void {
+  mkdirSync(PID_DIR, { recursive: true, mode: 0o755 })
+  const record: PidRecord = { pid: process.pid, ts: Date.now() }
+  writeFileSync(PID_FILE, JSON.stringify(record), { mode: 0o644 })
+}
+
+function removePidFile(): void {
+  try {
+    rmSync(PID_FILE)
+  } catch { /* ignore */ }
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function elect(): Promise<boolean> {
+  // Random backoff to prevent thundering herd
+  await sleep(randomBetween(ELECTION_RANDOM_MS[0], ELECTION_RANDOM_MS[1]))
+
+  // Double-check: another process may have become leader while we slept
+  const current = readPidFile()
+  if (current && current.pid !== process.pid && isPidAlive(current.pid)) {
+    return false // Someone else won
+  }
+
+  writePidFile()
+  return true // We are the new leader
+}
+
+async function standby(): Promise<void> {
+  // Stay connected via stdio but do NOT poll Telegram — only one instance polls
+  process.stderr.write('telegram channel: standby mode (another instance is polling)\n')
+
+  // Periodically check if leader is still alive
+  while (true) {
+    await sleep(LEADER_CHECK_INTERVAL_MS)
+    const current = readPidFile()
+    if (!current || !isPidAlive(current.pid)) {
+      process.stderr.write('telegram channel: leader gone, attempting election\n')
+      if (await elect()) {
+        process.stderr.write('telegram channel: won election, becoming leader\n')
+        return // Caller should start polling
+      }
+      // Lost election, continue standby
+    }
+  }
+}
+
 // Last-resort safety net — without these the process dies silently on any
 // unhandled promise rejection. With them it logs and keeps serving tools.
 process.on('unhandledRejection', err => {
@@ -630,11 +711,42 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['chat_id', 'message_id', 'text'],
       },
     },
+    {
+      name: 'telegram_status',
+      description: 'Get Telegram channel connection status — shows whether this session is the leader (polling) or standby, and the leader PID if different.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    },
   ],
 }))
 
 mcp.setRequestHandler(CallToolRequestSchema, async req => {
   const args = (req.params.arguments ?? {}) as Record<string, unknown>
+
+  // telegram_status works in any mode — must be before the standby guard
+  if (req.params.name === 'telegram_status') {
+    const leader = readPidFile()
+    return {
+      content: [{
+        type: 'text',
+        text: isLeader
+          ? `Leader mode — this session is polling Telegram (PID ${process.pid})`
+          : `Standby mode — Telegram is handled by PID ${leader?.pid ?? 'unknown'}`,
+      }],
+    }
+  }
+
+  // Standby instances cannot send Telegram messages — only the leader polls
+  if (!isLeader) {
+    const pid = readPidFile()?.pid
+    return {
+      content: [{ type: 'text', text: `Telegram is handled by another session (PID ${pid ?? 'unknown'}). Reply unavailable.` }],
+      isError: true,
+    }
+  }
+
   try {
     switch (req.params.name) {
       case 'reply': {
@@ -774,10 +886,19 @@ await mcp.connect(new StdioServerTransport())
 // the bot keeps polling forever as a zombie, holding the token and blocking
 // the next session with 409 Conflict.
 let shuttingDown = false
+let isLeader = false
 function shutdown(): void {
   if (shuttingDown) return
   shuttingDown = true
   process.stderr.write('telegram channel: shutting down\n')
+  // If we are the leader, remove PID file so a standby instance can take over
+  if (isLeader) {
+    const current = readPidFile()
+    if (current && current.pid === process.pid) {
+      removePidFile()
+      process.stderr.write('telegram channel: removed PID file\n')
+    }
+  }
   // bot.stop() signals the poll loop to end; the current getUpdates request
   // may take up to its long-poll timeout to return. Force-exit after 2s.
   setTimeout(() => process.exit(0), 2000)
@@ -1110,10 +1231,31 @@ bot.catch(err => {
   process.stderr.write(`telegram channel: handler error (polling continues): ${err.error}\n`)
 })
 
-// 409 Conflict = another getUpdates consumer is still active (zombie from a
-// previous session, or a second Claude Code instance). Retry with backoff
-// until the slot frees up instead of crashing on the first rejection.
+// Leader election: check if another instance is polling before starting
 void (async () => {
+  // Check existing PID file
+  const existing = readPidFile()
+  if (existing && isPidAlive(existing.pid)) {
+    // Another instance is leader — enter standby mode
+    process.stderr.write('telegram channel: leader already running (PID ' + existing.pid + '), entering standby\n')
+    await standby()
+    // standby() only returns if we became leader
+    process.stderr.write('telegram channel: became leader\n')
+  } else {
+    // No leader or leader dead — try to become leader
+    if (!(await elect())) {
+      // Lost election — enter standby
+      process.stderr.write('telegram channel: lost election, entering standby\n')
+      await standby()
+      process.stderr.write('telegram channel: became leader\n')
+    } else {
+      process.stderr.write('telegram channel: elected leader (PID ' + process.pid + ')\n')
+    }
+  }
+
+  isLeader = true
+
+  // We are the leader — start polling
   for (let attempt = 1; ; attempt++) {
     try {
       await bot.start({
@@ -1134,11 +1276,8 @@ void (async () => {
     } catch (err) {
       if (err instanceof GrammyError && err.error_code === 409) {
         const delay = Math.min(1000 * attempt, 15000)
-        const detail = attempt === 1
-          ? ' — another instance is polling (zombie session, or a second Claude Code running?)'
-          : ''
         process.stderr.write(
-          `telegram channel: 409 Conflict${detail}, retrying in ${delay / 1000}s\n`,
+          `telegram channel: 409 Conflict after becoming leader, retrying in ${delay / 1000}s\n`,
         )
         await new Promise(r => setTimeout(r, delay))
         continue
