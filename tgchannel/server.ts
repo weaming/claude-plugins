@@ -219,8 +219,7 @@ if (!TOKEN) {
 }
 
 // --- Leader Election (multi-instance protection) ---
-const PID_DIR = join(homedir(), '.config', 'mcp')
-const PID_FILE = join(PID_DIR, 'telegram-channel.pid')
+const PID_FILE = join(STATE_DIR, 'telegram-channel.pid')
 const LEADER_CHECK_INTERVAL_MS = 20_000   // 20s between leader liveness checks
 const ELECTION_RANDOM_MS = [1000, 3000]  // 1-3s random backoff
 
@@ -246,7 +245,7 @@ function readPidFile(): PidRecord | null {
 }
 
 function writePidFile(): void {
-  mkdirSync(PID_DIR, { recursive: true, mode: 0o755 })
+  mkdirSync(STATE_DIR, { recursive: true, mode: 0o755 })
   const record: PidRecord = { pid: process.pid, ts: Date.now() }
   writeFileSync(PID_FILE, JSON.stringify(record), { mode: 0o644 })
 }
