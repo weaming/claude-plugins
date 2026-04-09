@@ -21,7 +21,7 @@ Telegram channel plugin for Claude Code with Markdown to HTML conversion.
 ## Installation
 
 ```bash
-/plugin install telegram-unofficial@weaming-plugins
+/plugin install tgchannel@weaming-plugins
 /reload-plugins
 ```
 
@@ -30,21 +30,21 @@ Telegram channel plugin for Claude Code with Markdown to HTML conversion.
 Restart Claude Code with:
 
 ```bash
-claude --dangerously-load-development-channels plugin:telegram-unofficial@weaming-plugins
+claude --dangerously-load-development-channels plugin:tgchannel@weaming-plugins
 ```
 
 ## Configuration
 
 ```bash
-/telegram-unofficial:configure <token>
+/tgchannel:configure <token>
 ```
 
 ## Pair Your Account
 
 1. Open Telegram and send any message to your bot
 2. The bot will reply with a pairing code
-3. In Claude Code, run: `/telegram-unofficial:access pair <code>`
-4. Lock down access: `/telegram-unofficial:access policy allowlist`
+3. In Claude Code, run: `/tgchannel:access pair <code>`
+4. Lock down access: `/tgchannel:access policy allowlist`
 
 ## Upgrading
 

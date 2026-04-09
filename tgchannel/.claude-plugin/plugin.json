@@ -1,7 +1,7 @@
 {
-  "name": "telegram-unofficial",
+  "name": "tgchannel",
   "description": "Telegram channel plugin for Claude Code - with Markdown to HTML conversion",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": {
     "name": "weaming"
   }

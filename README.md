@@ -4,9 +4,9 @@ Unofficial plugin marketplace for Claude Code.
 
 ## Available Plugins
 
-| Plugin | Description |
-|--------|-------------|
-| [telegram-unofficial](./telegram-unofficial/) | Telegram channel with Markdown to HTML conversion |
+| Plugin                    | Description                                       |
+| ------------------------- | ------------------------------------------------- |
+| [tgchannel](./tgchannel/) | Telegram channel with Markdown to HTML conversion |
 
 ## Installation
 
