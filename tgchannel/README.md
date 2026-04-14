@@ -1,12 +1,12 @@
 # Telegram Unofficial Plugin
 
-Telegram channel plugin for Claude Code with Markdown to HTML conversion.
+Telegram channel plugin for Claude Code with Markdown to HTML conversion and multi-instance support.
 
 ## Features
 
 - **Markdown to HTML auto-conversion** - Messages are automatically formatted as Telegram-friendly HTML
 - **Nested list bullets** - `●` / `○` / `▪` for visual hierarchy
-- **Default format: markdown** - No need to specify `format: 'html'` manually
+- **Multi-instance support** - Connect multiple Claude CLI instances and switch between them via Telegram buttons
 
 ### Formatting Examples
 
@@ -18,36 +18,39 @@ Telegram channel plugin for Claude Code with Markdown to HTML conversion.
 | `- item`     | ● item          |
 | `- nested`   | ○ nested        |
 
-## Installation
+## Architecture
 
-```bash
-/plugin install tgchannel@weaming-plugins
-/reload-plugins
+```
+Telegram ←→ Center Manager ←→ Claude Client(s)
+                    ↑
+              Unix Socket
 ```
 
-## Enable Channel
+## Startup
 
-Restart Claude Code with:
+### 1. Start Center Manager (must run first)
+
+```bash
+cd tgchannel/server
+bun install
+bun index.ts
+```
+
+### 2. Start Claude CLI
+
+Restart Claude Code with the plugin loaded:
 
 ```bash
 claude --dangerously-load-development-channels plugin:tgchannel@weaming-plugins
 ```
 
-## Configuration
+Multiple Claude CLI instances can connect. Only the **active instance** receives Telegram messages.
 
-```bash
-/tgchannel:configure <token>
-```
+## Switching Instances
 
-## Pair Your Account
+In Telegram, use `/switch` to list all connected instances and tap a button to switch.
 
-1. Open Telegram and send any message to your bot
-2. The bot will reply with a pairing code
-3. In Claude Code, run: `/tgchannel:access pair <code>`
-4. Lock down access: `/tgchannel:access policy allowlist`
+## Commands
 
-## Upgrading
-
-```bash
-/plugin marketplace update weaming-plugins
-```
+- `/start` - Welcome message
+- `/switch` - Switch between Claude instances

@@ -8,7 +8,7 @@
         "${CLAUDE_PLUGIN_ROOT}",
         "--shell=bun",
         "--silent",
-        "start"
+        "client/mcp.ts"
       ]
     }
   }
