@@ -225,28 +225,125 @@ function escapeHtml(text: string): string {
 // Nested list bullet mapping for Telegram HTML output
 const LIST_BULLETS = ['●', '○', '▪']
 
+// Table rendering helpers (matching xbot compact table mode)
+function _displayWidth(text: string): number {
+  let w = 0
+  for (const ch of text) {
+    const cp = ch.charCodeAt(0)
+    if (
+      (0x1100 <= cp && cp <= 0x115F) ||
+      (0x2E80 <= cp && cp <= 0x303F) ||
+      (0x3040 <= cp && cp <= 0x33FF) ||
+      (0x3400 <= cp && cp <= 0x4DBF) ||
+      (0x4E00 <= cp && cp <= 0xA4FF) ||
+      (0xAC00 <= cp && cp <= 0xD7FF) ||
+      (0xF900 <= cp && cp <= 0xFAFF) ||
+      (0xFE10 <= cp && cp <= 0xFE6F) ||
+      (0xFF01 <= cp && cp <= 0xFF60) ||
+      (0xFFE0 <= cp && cp <= 0xFFE6)
+    ) {
+      w += 1
+    } else {
+      w += 1
+    }
+  }
+  return w
+}
+
+function _ljust(text: string, width: number): string {
+  return text + ' '.repeat(Math.max(0, width - _displayWidth(text)))
+}
+
+function _truncate(text: string, width: number): string {
+  if (_displayWidth(text) <= width) return text
+  let result = ''
+  for (const ch of text) {
+    if (_displayWidth(result + ch) > width - 1) break
+    result += ch
+  }
+  return result + '\u2026'
+}
+
+/**
+ * Parse a GFM table from lines starting at the given index.
+ * Returns [rows, nextIndex] where rows is string[][] and nextIndex is after the table.
+ */
+function parseTable(lines: string[], startIdx: number): { rows: string[][]; endIdx: number } {
+  const rows: string[][] = []
+  let i = startIdx
+  if (i >= lines.length) return { rows, endIdx: i }
+
+  // First line: header
+  const headerCells = lines[i].split('|').slice(1, -1).map(c => c.trim())
+  rows.push(headerCells)
+  i++
+
+  // Second line: separator (|---|---|...)
+  if (i >= lines.length || !/^[\s|:-]+$/.test(lines[i])) {
+    return { rows, endIdx: startIdx }
+  }
+  i++
+
+  // Remaining lines: data rows
+  while (i < lines.length && lines[i].includes('|')) {
+    const cells = lines[i].split('|').slice(1, -1).map(c => c.trim())
+    rows.push(cells)
+    i++
+  }
+
+  return { rows, endIdx: i }
+}
+
+function renderTable(rows: string[][]): string {
+  const MAX_COL_WIDTH = 20
+  const numCols = Math.max(...rows.map(r => r.length))
+
+  // Pad rows to same length
+  for (const row of rows) {
+    while (row.length < numCols) row.push('')
+  }
+
+  // Calculate column widths
+  const rawWidths: number[] = []
+  for (let i = 0; i < numCols; i++) {
+    let maxW = 0
+    for (const row of rows) {
+      maxW = Math.max(maxW, _displayWidth(row[i] ?? ''))
+    }
+    rawWidths.push(maxW)
+  }
+  const colWidths = rawWidths.map(w => Math.min(w, MAX_COL_WIDTH))
+
+  // Build output
+  const outLines: string[] = []
+  for (let idx = 0; idx < rows.length; idx++) {
+    const cells = rows[idx].map((cell, i) =>
+      _ljust(_truncate(escapeHtml(cell), colWidths[i]), colWidths[i])
+    )
+    outLines.push(cells.join('  '))
+    if (idx === 0) {
+      outLines.push(colWidths.map(w => '\u2500'.repeat(w)).join(''))
+    }
+  }
+
+  return '<pre>' + outLines.join('\n') + '</pre>'
+}
+
 /**
  * Convert markdown to Telegram HTML.
- * Handles: bold, italic, inline code, code blocks, links, lists, strikethrough.
+ * Matches ~/src/ai-box/xbot/src/utils/markdown-converter.ts approach:
+ * lists rendered as plain text with bullets, no <ul>/<li> tags.
+ * Supported: bold(**), italic(*), ~~strikethrough~~, inline code, code blocks, lists, headings, links, hr, tables.
  */
 function mdToHtml(md: string): string {
   const lines = md.split('\n')
   const out: string[] = []
   let inList = false
   let listDepth = 0
+  let listOrdered = false
+  let listCounter = 0
   let inCodeBlock = false
   let codeBlockLines: string[] = []
-
-  function closeList(): void {
-    if (inList) {
-      while (listDepth > 0) {
-        out.push('</ul>')
-        listDepth--
-      }
-      out.push('</ul>')
-      inList = false
-    }
-  }
 
   function indentDepth(line: string): number {
     let depth = 0
@@ -266,7 +363,7 @@ function mdToHtml(md: string): string {
     })
 
     // 2. Find all delimiter positions
-    const delims: Array<{ pos: number; type: 'B' | 'I' | 'S' }> = [] // B=**/__, I=*/_, S=~~
+    const delims: Array<{ pos: number; type: 'B' | 'I' | 'S' }> = []
     let i = 0
     while (i < s.length) {
       if (s.startsWith('**', i) || s.startsWith('__', i)) { delims.push({ pos: i, type: 'B' }); i += 2; continue }
@@ -276,8 +373,7 @@ function mdToHtml(md: string): string {
       i++
     }
 
-    // 3. Find matching pairs using a stack-based approach per type
-    // For each type, match delimiters in order (nearest pair first)
+    // 3. Find matching pairs
     const pairs: Array<{ open: number; close: number; tag: string; dlen: number }> = []
 
     function matchType(type: 'B' | 'S' | 'I', dlen: number, tag: string): void {
@@ -293,13 +389,11 @@ function mdToHtml(md: string): string {
       }
     }
 
-    // Match in priority order: ** > ~~ > __ > * > _
     matchType('B', 2, 'b')
     matchType('S', 2, 's')
     matchType('I', 1, 'i')
 
-    // 4. Remove crossing pairs (partial overlaps)
-    // A pair (a,b) crosses (c,d) if a < c < b < d or c < a < d < b
+    // 4. Remove crossing pairs
     pairs.sort((a, b) => a.open - b.open || a.close - b.close)
 
     const accepted: typeof pairs = []
@@ -307,8 +401,8 @@ function mdToHtml(md: string): string {
       let crosses = false
       for (const a of accepted) {
         if (p.open < a.close && a.open < p.close &&
-          !(a.open <= p.open && p.close <= a.close) && // not nested in a
-          !(p.open <= a.open && a.close <= p.close)) {  // a not nested in p
+          !(a.open <= p.open && p.close <= a.close) &&
+          !(p.open <= a.open && a.close <= p.close)) {
           crosses = true
           break
         }
@@ -316,11 +410,10 @@ function mdToHtml(md: string): string {
       if (!crosses) accepted.push(p)
     }
 
-    // 5. Build nesting tree
+    // 5. Build nesting tree and emit
     type Node = { pair: typeof accepted[0]; children: Node[] }
     const nodes: Node[] = accepted.map(p => ({ pair: p, children: [] }))
 
-    // Find parent for each node (the smallest accepted span that fully contains it)
     for (const node of nodes) {
       let bestParent: Node | null = null
       for (const other of nodes) {
@@ -334,21 +427,18 @@ function mdToHtml(md: string): string {
       if (bestParent) bestParent.children.push(node)
     }
 
-    // Sort children by open position
     for (const node of nodes) {
       node.children.sort((a, b) => a.pair.open - b.pair.open)
     }
 
-    // Get root nodes (no parent)
-    const roots = nodes.filter(node => {
-      return !nodes.some(other =>
+    const roots = nodes.filter(node =>
+      !nodes.some(other =>
         other !== node &&
         other.pair.open <= node.pair.open &&
         other.pair.close >= node.pair.close
       )
-    })
+    )
 
-    // Emit a single node with its children, escaping non-child text portions
     function emitNode(node: Node): string {
       const openLen = node.pair.dlen
       const innerEnd = node.pair.close
@@ -375,7 +465,6 @@ function mdToHtml(md: string): string {
       let lastPos = startText
 
       for (const node of nodeList) {
-        // Plain text before this node
         if (node.pair.open > lastPos) {
           result += escapeHtml(s.slice(lastPos, node.pair.open))
         }
@@ -390,50 +479,83 @@ function mdToHtml(md: string): string {
 
     let result = emitRoots(roots, 0, s.length)
 
-    // 7. Restore inline code
+    // 6. Restore inline code
     for (let i = 0; i < codeBlocks.length; i++) {
       result = result.replace(`\x00C${i}\x00`, `<code>${codeBlocks[i]}</code>`)
     }
+
+    // 7. Convert [text](url) links
+    result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, href) => {
+      if (!/^https?:\/\/|tg:\/\//i.test(href)) {
+        return text
+      }
+      return `<a href="${href}">${text}</a>`
+    })
+
     return result
   }
 
   function handleListLine(line: string): boolean {
-    const listMatch = line.match(/^(\s*)[-*]\s(.*)/)
+    // Check for checklist: - [ ] or - [x]
+    const checklistMatch = line.match(/^(\s*)- \[([ xX])\]\s(.*)/)
+    const unorderedMatch = line.match(/^(\s*)[-*]\s(.*)/)
+    const orderedMatch = line.match(/^(\s*)(\d+)\.\s(.*)/)
+    const listMatch = checklistMatch || unorderedMatch || orderedMatch
     if (!listMatch) return false
 
     const newDepth = indentDepth(line)
+    const isChecklist = !!checklistMatch
+    const isOrdered = !!orderedMatch
+
     if (!inList) {
       inList = true
       listDepth = newDepth
-      out.push('<ul>')
+      listOrdered = isOrdered
+      listCounter = isOrdered ? Number(orderedMatch[2]) : 0
     } else if (newDepth > listDepth) {
-      // Jump deeper: open intermediate levels with empty items
-      while (newDepth > listDepth) {
-        out.push('<ul>')
-        listDepth++
-      }
+      listDepth = newDepth
     } else if (newDepth < listDepth) {
-      while (newDepth < listDepth) {
-        out.push('</ul>')
-        listDepth--
-      }
+      listDepth = newDepth
+      // Switch between ordered/unordered at this depth
+      listOrdered = isOrdered
+      listCounter = isOrdered ? Number(orderedMatch[2]) : 0
+    } else if (listOrdered !== isOrdered) {
+      // Same depth but different type, reset list
+      listOrdered = isOrdered
+      listCounter = isOrdered ? Number(orderedMatch[2]) : 0
     }
-    const bullet = LIST_BULLETS[Math.min(listDepth, LIST_BULLETS.length - 1)]
-    const content = convertInline(listMatch[2])
-    out.push(`<li>${bullet} ${content}</li>`)
+
+    const indent = '\u00A0\u00A0'.repeat(Math.max(0, listDepth - 1))
+
+    if (isChecklist) {
+      const checked = checklistMatch[2].toLowerCase() === 'x'
+      const bullet = checked ? '✅' : '☑️'
+      const content = convertInline(checklistMatch[3])
+      out.push(`${indent}${bullet} ${content}`)
+    } else if (listOrdered && orderedMatch) {
+      const bullet = `${listCounter}.`
+      listCounter++
+      const content = convertInline(orderedMatch[3])
+      out.push(`${indent}${bullet} ${content}`)
+    } else {
+      const content = convertInline(unorderedMatch![2])
+      const bullet = LIST_BULLETS[Math.min(listDepth, LIST_BULLETS.length - 1)]
+      out.push(`${indent}${bullet} ${content}`)
+    }
     return true
   }
 
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
     // Code block
     if (line.startsWith('```')) {
       if (inCodeBlock) {
         const code = escapeHtml(codeBlockLines.join('\n'))
-        out.push('<pre>' + code + '</pre>')
+        out.push('<pre><code>' + code + '</code></pre>')
         codeBlockLines = []
         inCodeBlock = false
       } else {
-        closeList()
+        inList = false
         inCodeBlock = true
       }
       continue
@@ -446,11 +568,38 @@ function mdToHtml(md: string): string {
     // List items
     if (handleListLine(line)) continue
 
-    closeList()
+    // Table detection: line starts with | and has at least one more | cell
+    if (line.trim().startsWith('|') && line.split('|').length > 2) {
+      const { rows, endIdx } = parseTable(lines, i)
+      if (rows.length > 1) {
+        out.push(renderTable(rows))
+        i = endIdx - 1
+        continue
+      }
+    }
+
+    // Not a list line anymore
+    inList = false
+    listDepth = 0
+    listCounter = 0
 
     // Empty line
     if (line.trim() === '') {
       out.push('')
+      continue
+    }
+
+    // Horizontal rule
+    if (/^(-{3,}|_{3,}|\*{3,})$/.test(line.trim())) {
+      out.push('-------------------')
+      continue
+    }
+
+    // Heading
+    const headingMatch = line.match(/^#{1,6}\s+(.*)/)
+    if (headingMatch) {
+      const content = convertInline(headingMatch[1])
+      out.push(`\n<b>${content}</b>\n`)
       continue
     }
 
@@ -460,11 +609,10 @@ function mdToHtml(md: string): string {
 
   if (inCodeBlock) {
     const code = escapeHtml(codeBlockLines.join('\n'))
-    out.push('<pre>' + code + '</pre>')
+    out.push('<pre><code>' + code + '</code></pre>')
   }
-  closeList()
 
-  return out.join('\n')
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim()
 }
 
 const MAX_CHUNK_LIMIT = 4096
@@ -494,8 +642,7 @@ async function sendReply(chat_id: string, text: string, reply_to?: string, files
 
   // Send files first as media group or individual messages
   const ids: number[] = []
-  const parseMode: 'HTML' | undefined = format !== 'text' ? 'HTML' : undefined
-  const body = format === 'markdown' ? mdToHtml(text) : text
+  const body = mdToHtml(text)
 
   if (files && files.length > 0) {
     for (const filePath of files) {
@@ -507,14 +654,14 @@ async function sendReply(chat_id: string, text: string, reply_to?: string, files
             const sent = await bot.api.sendPhoto(chat_id, new InputFile(filePath), {
               caption: ids.length === 0 ? body : undefined,
               ...(ids.length === 0 && reply_to ? { reply_parameters: { message_id: Number(reply_to) } } : {}),
-              ...(parseMode && ids.length === 0 ? { parse_mode: parseMode } : {}),
+              ...(ids.length === 0 ? { parse_mode: 'HTML' } : {}),
             })
             ids.push(sent.message_id)
           } else {
             const sent = await bot.api.sendDocument(chat_id, new InputFile(filePath), {
               caption: ids.length === 0 ? body : undefined,
               ...(ids.length === 0 && reply_to ? { reply_parameters: { message_id: Number(reply_to) } } : {}),
-              ...(parseMode && ids.length === 0 ? { parse_mode: parseMode } : {}),
+              ...(ids.length === 0 ? { parse_mode: 'HTML' } : {}),
             })
             ids.push(sent.message_id)
           }
@@ -533,7 +680,7 @@ async function sendReply(chat_id: string, text: string, reply_to?: string, files
     for (let i = 0; i < chunks.length; i++) {
       const sent = await bot.api.sendMessage(chat_id, chunks[i], {
         ...(reply_to && i === 0 ? { reply_parameters: { message_id: Number(reply_to) } } : {}),
-        ...(parseMode ? { parse_mode: parseMode } : {}),
+        parse_mode: 'HTML',
       })
       ids.push(sent.message_id)
     }
@@ -543,6 +690,30 @@ async function sendReply(chat_id: string, text: string, reply_to?: string, files
 
 // --- Session store ---
 const store = new SessionStore()
+const ACTIVE_STATE_FILE = join(BASE_DIR, 'active.json')
+
+function saveActiveState(sessionId: string | null): void {
+  writeFileSync(ACTIVE_STATE_FILE, JSON.stringify(sessionId) + '\n', { mode: 0o644 })
+}
+
+function loadActiveState(): string | null {
+  try {
+    if (!existsSync(ACTIVE_STATE_FILE)) return null
+    return JSON.parse(readFileSync(ACTIVE_STATE_FILE, 'utf8').trim()) as string | null
+  } catch {
+    return null
+  }
+}
+
+// Auto-activate: restore the last active session, give it 3s to reconnect after center start
+const AUTO_ACTIVATE_TIMEOUT = 3000
+const restoredId = loadActiveState()
+if (restoredId) store.setPendingRestore(restoredId)
+const activateTimer = setTimeout(() => {
+  store.clearPendingRestore()
+  log('auto-activate window expired')
+}, AUTO_ACTIVATE_TIMEOUT)
+activateTimer.unref()
 
 // --- Socket server ---
 const sockets = new Map<string, NetSocket>()
@@ -570,6 +741,7 @@ setInterval(() => {
       sockets.delete(sid)
       lastPongTime.delete(sid)
       store.unregister(sid)
+      saveActiveState(store.getActive())
       broadcastToAll({ type: 'instances_updated', instances: store.getAllInstances() })
     }
   }
@@ -595,6 +767,7 @@ const server = createServer((socket: NetSocket) => {
     if (sessionId) {
       sockets.delete(sessionId)
       store.unregister(sessionId)
+      saveActiveState(store.getActive())
       broadcastToAll({ type: 'instances_updated' })
       log('instance disconnected:', sessionId)
     }
@@ -630,7 +803,13 @@ async function handleSocketMessage(
         registeredAt: Date.now(),
         lastActivityAt: Date.now(),
       }
+      const isReconnect = store.shouldAutoActivate(msg.sessionId, AUTO_ACTIVATE_TIMEOUT)
       store.register(inst)
+      if (isReconnect) {
+        store.setActive(msg.sessionId)
+        store.clearPendingRestore()
+        log('auto-activated restored session:', msg.sessionId)
+      }
       sockets.set(msg.sessionId, socket)
       setSessionId(msg.sessionId)
       log('instance registered:', msg.sessionId)
@@ -649,12 +828,15 @@ async function handleSocketMessage(
       sockets.delete(msg.sessionId)
       lastPongTime.delete(msg.sessionId)
       store.unregister(msg.sessionId)
+      saveActiveState(store.getActive())
       broadcastToAll({ type: 'instances_updated', instances: store.getAllInstances() })
       log('client unregistered:', msg.sessionId)
       break
     }
     case 'switch': {
       if (store.setActive(msg.toSessionId)) {
+        store.clearPendingRestore()
+        saveActiveState(msg.toSessionId)
         log('switched active to:', msg.toSessionId)
         // Notify all instances
         broadcastToAll({ type: 'active_changed', activeSessionId: msg.toSessionId })
@@ -704,9 +886,7 @@ async function handleSocketMessage(
       break
     }
     case 'edit_message': {
-      const editText = msg.format === 'markdown'
-        ? escapeHtml(msg.text)
-        : msg.text
+      const editText = mdToHtml(msg.text)
       bot.api.editMessageText(msg.chat_id, Number(msg.message_id), editText, {
         parse_mode: 'HTML',
       }).catch(err => {
@@ -767,12 +947,14 @@ function displayName(label: string): string {
 
 // Build inline keyboard with instance buttons
 function buildInstanceKeyboard(activeSessionId: string | null): InlineKeyboard {
-  const instances = store.getAllInstances()
+  const instances = store.getAllInstances().sort((a, b) => a.sessionId.localeCompare(b.sessionId))
   const keyboard = new InlineKeyboard()
 
-  for (const inst of instances) {
-    const mark = inst.sessionId === activeSessionId ? ' ✅' : ''
-    keyboard.text(`${displayName(inst.label)}${mark}`, `switch:${inst.sessionId}`)
+  for (let i = 0; i < instances.length; i++) {
+    const inst = instances[i]
+    const letter = String.fromCharCode(65 + i)
+    const btnText = inst.sessionId === activeSessionId ? `✅ ${letter}` : letter
+    keyboard.text(btnText, `switch:${inst.sessionId}`)
   }
 
   return keyboard
@@ -796,6 +978,8 @@ bot.on('callback_query:data', async ctx => {
 
   const success = store.setActive(targetSessionId)
   if (success) {
+    store.clearPendingRestore()
+    saveActiveState(targetSessionId)
     const inst = store.getInstance(targetSessionId)
     await ctx.answerCallbackQuery({ text: `已切换到 ${displayName(inst?.label ?? targetSessionId)}` }).catch(() => {})
     // Update message with new keyboard
@@ -889,24 +1073,11 @@ bot.command('start', async ctx => {
   )
 })
 
-// --- /help command ---
-bot.command('help', async ctx => {
-  if (ctx.chat?.type !== 'private') return
-  log('telegram command: /help from', ctx.from?.username ?? ctx.from?.id)
-  await ctx.reply(
-    '命令列表：\n' +
-    '/start - 显示欢迎信息\n' +
-    '/help - 显示此帮助\n' +
-    '/switch - 切换 Claude 实例\n\n' +
-    '支持发送文本、图片或文件。'
-  )
-})
-
 // --- /switch command: list all instances with buttons ---
 bot.command('switch', async ctx => {
   if (ctx.chat?.type !== 'private') return
   log('telegram command: /switch from', ctx.from?.username ?? ctx.from?.id)
-  const instances = store.getAllInstances()
+  const instances = store.getAllInstances().sort((a, b) => a.sessionId.localeCompare(b.sessionId))
   if (instances.length === 0) {
     await ctx.reply('没有 Claude 实例连接。')
     return
@@ -914,8 +1085,8 @@ bot.command('switch', async ctx => {
   const activeId = store.getActive()
   const keyboard = buildInstanceKeyboard(activeId)
   const lines = instances.map((inst, i) => {
-    const mark = inst.sessionId === activeId ? '✅ ' : '  '
-    return `${mark}${i + 1}. ${displayName(inst.label)}`
+    const letter = String.fromCharCode(65 + i)
+    return `${letter}. ${displayName(inst.label)}`
   }).join('\n')
   await ctx.reply(`已连接的 Claude 实例：\n\n${lines}\n\n点击按钮切换：`, {
     reply_markup: keyboard,

@@ -17,6 +17,29 @@ export class SessionStore {
   private instances = new Map<string, Instance>()
   private activeSessionId: string | null = null
 
+  // Pending restore: remembers the last active session across center restarts
+  private pendingRestoreId: string | null = null
+  private pendingRestoreAt: number = 0
+
+  /**
+   * Remember the last active session before center restart.
+   * When this session reconnects before the timeout expires, auto-activate it.
+   */
+  setPendingRestore(sessionId: string | null): void {
+    this.pendingRestoreId = sessionId
+    this.pendingRestoreAt = Date.now()
+  }
+
+  clearPendingRestore(): void {
+    this.pendingRestoreId = null
+    this.pendingRestoreAt = 0
+  }
+
+  shouldAutoActivate(sessionId: string, timeoutMs: number): boolean {
+    if (this.pendingRestoreId !== sessionId) return false
+    return (Date.now() - this.pendingRestoreAt) < timeoutMs
+  }
+
   register(inst: Instance): void {
     this.instances.set(inst.sessionId, inst)
     if (this.activeSessionId === null) {

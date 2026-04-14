@@ -344,9 +344,9 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           text: { type: 'string' },
           reply_to: { type: 'string', description: 'Message ID to reply to' },
           files: { type: 'array', items: { type: 'string' }, description: 'Absolute file paths to attach' },
-          format: { type: 'string', enum: ['text', 'markdown', 'html'], description: "Rendering mode. Default: 'markdown'" },
+          format: { type: 'string', enum: ['markdown'], description: "Telegram formatting mode — always 'markdown'" },
         },
-        required: ['chat_id', 'text'],
+        required: ['chat_id', 'text', 'format'],
       },
     },
     {
@@ -371,13 +371,9 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           chat_id: { type: 'string' },
           message_id: { type: 'string' },
           text: { type: 'string' },
-          format: {
-            type: 'string',
-            enum: ['text', 'html'],
-            description: "Rendering mode. 'html' enables Telegram HTML formatting. Default: 'text'",
-          },
+          format: { type: 'string', enum: ['markdown'], description: "Telegram formatting mode — always 'markdown'" },
         },
-        required: ['chat_id', 'message_id', 'text'],
+        required: ['chat_id', 'message_id', 'text', 'format'],
       },
     },
     {
