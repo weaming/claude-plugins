@@ -82,6 +82,9 @@ function detectChannelEnabled(): boolean {
   return false
 }
 
+// Determined once at startup — inspects Claude's CLI args
+const channelEnabled = detectChannelEnabled()
+
 // --- Ensure log dir exists ---
 mkdirSync(LOG_DIR, { recursive: true, mode: 0o755 })
 
@@ -106,11 +109,22 @@ const mcp = new Server(
       },
     },
     instructions: [
-      'The tgclient plugin connects to a central Telegram manager.',
-      'Messages from Telegram arrive as <channel source="tgclient" chat_id="..." message_id="..." user="..." ts="...">.',
-      'Reply using the reply tool to send messages back via the center manager.',
-      'Multiple Claude instances can connect - the center manager routes messages to the active instance.',
-      'Use the switch_instance tool to change which instance is active.',
+      'CRITICAL: The user is on Telegram and CANNOT see your terminal output. ALL responses must use the reply tool — your normal text response never reaches them.',
+      '',
+      'Messages arrive as <channel source="tgclient" chat_id="..." message_id="..." user="..." ts="...">.',
+      'The chat_id in the tag is REQUIRED for the reply tool — always pass it back.',
+      'If the tag has an image_path attribute, Read that file — it is a photo the sender attached.',
+      'If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path.',
+      '',
+      'WORKFLOW: Do all your thinking and work, then call the reply tool with your final answer.',
+      'For the latest message from the user, call reply with chat_id and text — no reply_to needed.',
+      'Only use reply_to (set to a message_id) when quoting an earlier message in a multi-turn thread.',
+      '',
+      'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates.',
+      'Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
+      '',
+      'Telegram\'s Bot API exposes no history or search — you only see messages as they arrive.',
+      'If you need earlier context, ask the user to paste it or summarize.',
     ].join('\n'),
   },
 )
@@ -168,9 +182,14 @@ function scheduleReconnect(): void {
   if (reconnectTimer) return
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null
+    if (!channelEnabled) return
+    log('client: reconnecting...')
     connectSocket()
-      .then(() => register())
-      .catch(log)
+      .then(() => register(channelEnabled))
+      .catch(err => {
+        log('client: reconnect failed:', err.message ?? err)
+        scheduleReconnect()
+      })
   }, 3000)
 }
 
@@ -180,7 +199,7 @@ function startHeartbeat(): void {
   heartbeatTimer = setInterval(() => {
     if (socket && isConnected) {
       // Check if last ping got a pong response
-      if (lastPingTime > 0 && Date.now() - lastPingTime > 1000) {
+      if (lastPingTime > 0 && Date.now() - lastPingTime > 3000) {
         log('client: pong timeout, reconnecting...')
         isConnected = false
         stopHeartbeat()
@@ -220,18 +239,25 @@ function handleSocketMessage(msg: any): void {
 
     case 'rejected':
       log('client: register rejected:', msg.reason)
-      process.exit(0)
+      if (channelEnabled) {
+        log('client: channel is enabled, will retry forever')
+        stopHeartbeat()
+        socket?.destroy()
+      } else {
+        process.exit(0)
+      }
       break
 
     case 'forward':
       // Forward message to Claude via MCP notification
       if (sessionId === activeSessionId) {
         // We're active - deliver to Claude
+        // Must match official plugin format: params has content + nested meta object
         mcp.notification({
           method: 'notifications/claude/channel',
           params: {
             content: msg.content,
-            meta: msg.meta,
+            meta: msg.meta ?? {},
           },
         }).catch(err => {
           log('client: failed to deliver forward to Claude:', err)
@@ -281,7 +307,7 @@ function handleSocketMessage(msg: any): void {
 }
 
 // --- Register with center ---
-async function register(channelReady: boolean): Promise<void> {
+async function register(channelEnabled: boolean): Promise<void> {
   const pid = process.pid
   const cwd = process.cwd()
   const label = clientId
@@ -293,7 +319,7 @@ async function register(channelReady: boolean): Promise<void> {
     label,
     lastMessage: '',
     cwd,
-    channelReady,
+    channelEnabled,
   })
 
   // Listen for MCP close - unregister from center when Claude disconnects
@@ -310,7 +336,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'reply',
-      description: 'Reply on Telegram via center manager. Pass chat_id and text.',
+      description: 'Send your response to the user on Telegram. REQUIRED — the user cannot see your terminal output. Pass chat_id (from the <channel> tag) and text (your response).',
       inputSchema: {
         type: 'object',
         properties: {
@@ -347,8 +373,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           text: { type: 'string' },
           format: {
             type: 'string',
-            enum: ['text', 'markdown', 'html'],
-            description: "Rendering mode. 'markdown' or 'html' enable Telegram formatting. Default: 'text'",
+            enum: ['text', 'html'],
+            description: "Rendering mode. 'html' enables Telegram HTML formatting. Default: 'text'",
           },
         },
         required: ['chat_id', 'message_id', 'text'],
@@ -497,10 +523,6 @@ mcp.setNotificationHandler(
 
 // --- Start ---
 async function main() {
-  // Detect whether Claude actually enabled this channel by inspecting
-  // Claude's CLI args. Must run BEFORE mcp.connect() since ps command
-  // may show different state after exec.
-  const channelEnabled = detectChannelEnabled()
   log('client: channel detected as', channelEnabled ? 'enabled' : 'disabled')
 
   await connectSocket()

@@ -222,6 +222,251 @@ function escapeHtml(text: string): string {
     .replace(/"/g, "&quot;")
 }
 
+// Nested list bullet mapping for Telegram HTML output
+const LIST_BULLETS = ['●', '○', '▪']
+
+/**
+ * Convert markdown to Telegram HTML.
+ * Handles: bold, italic, inline code, code blocks, links, lists, strikethrough.
+ */
+function mdToHtml(md: string): string {
+  const lines = md.split('\n')
+  const out: string[] = []
+  let inList = false
+  let listDepth = 0
+  let inCodeBlock = false
+  let codeBlockLines: string[] = []
+
+  function closeList(): void {
+    if (inList) {
+      while (listDepth > 0) {
+        out.push('</ul>')
+        listDepth--
+      }
+      out.push('</ul>')
+      inList = false
+    }
+  }
+
+  function indentDepth(line: string): number {
+    let depth = 0
+    for (let i = 0; i < line.length; i++) {
+      if (line[i] === ' ') depth++
+      else break
+    }
+    return Math.floor(depth / 2)
+  }
+
+  function convertInline(s: string): string {
+    // 1. Protect inline code with placeholders
+    const codeBlocks: string[] = []
+    s = s.replace(/`([^`]+)`/g, (_, code) => {
+      codeBlocks.push(escapeHtml(code))
+      return `\x00C${codeBlocks.length - 1}\x00`
+    })
+
+    // 2. Find all delimiter positions
+    const delims: Array<{ pos: number; type: 'B' | 'I' | 'S' }> = [] // B=**/__, I=*/_, S=~~
+    let i = 0
+    while (i < s.length) {
+      if (s.startsWith('**', i) || s.startsWith('__', i)) { delims.push({ pos: i, type: 'B' }); i += 2; continue }
+      if (s.startsWith('~~', i)) { delims.push({ pos: i, type: 'S' }); i += 2; continue }
+      if (s[i] === '*') { delims.push({ pos: i, type: 'I' }); i++; continue }
+      if (s[i] === '_') { delims.push({ pos: i, type: 'I' }); i++; continue }
+      i++
+    }
+
+    // 3. Find matching pairs using a stack-based approach per type
+    // For each type, match delimiters in order (nearest pair first)
+    const pairs: Array<{ open: number; close: number; tag: string; dlen: number }> = []
+
+    function matchType(type: 'B' | 'S' | 'I', dlen: number, tag: string): void {
+      const stack: number[] = []
+      for (const d of delims) {
+        if (d.type !== type) continue
+        if (stack.length > 0) {
+          const openPos = stack.pop()!
+          pairs.push({ open: openPos, close: d.pos, tag, dlen })
+        } else {
+          stack.push(d.pos)
+        }
+      }
+    }
+
+    // Match in priority order: ** > ~~ > __ > * > _
+    matchType('B', 2, 'b')
+    matchType('S', 2, 's')
+    matchType('I', 1, 'i')
+
+    // 4. Remove crossing pairs (partial overlaps)
+    // A pair (a,b) crosses (c,d) if a < c < b < d or c < a < d < b
+    pairs.sort((a, b) => a.open - b.open || a.close - b.close)
+
+    const accepted: typeof pairs = []
+    for (const p of pairs) {
+      let crosses = false
+      for (const a of accepted) {
+        if (p.open < a.close && a.open < p.close &&
+          !(a.open <= p.open && p.close <= a.close) && // not nested in a
+          !(p.open <= a.open && a.close <= p.close)) {  // a not nested in p
+          crosses = true
+          break
+        }
+      }
+      if (!crosses) accepted.push(p)
+    }
+
+    // 5. Build nesting tree
+    type Node = { pair: typeof accepted[0]; children: Node[] }
+    const nodes: Node[] = accepted.map(p => ({ pair: p, children: [] }))
+
+    // Find parent for each node (the smallest accepted span that fully contains it)
+    for (const node of nodes) {
+      let bestParent: Node | null = null
+      for (const other of nodes) {
+        if (other === node) continue
+        if (other.pair.open <= node.pair.open && other.pair.close >= node.pair.close) {
+          if (!bestParent || other.pair.close - other.pair.open < bestParent.pair.close - bestParent.pair.open) {
+            bestParent = other
+          }
+        }
+      }
+      if (bestParent) bestParent.children.push(node)
+    }
+
+    // Sort children by open position
+    for (const node of nodes) {
+      node.children.sort((a, b) => a.pair.open - b.pair.open)
+    }
+
+    // Get root nodes (no parent)
+    const roots = nodes.filter(node => {
+      return !nodes.some(other =>
+        other !== node &&
+        other.pair.open <= node.pair.open &&
+        other.pair.close >= node.pair.close
+      )
+    })
+
+    // Emit a single node with its children, escaping non-child text portions
+    function emitNode(node: Node): string {
+      const openLen = node.pair.dlen
+      const innerEnd = node.pair.close
+
+      let inner = ''
+      let lastPos = node.pair.open + openLen
+
+      for (const child of node.children) {
+        if (child.pair.open > lastPos) {
+          inner += escapeHtml(s.slice(lastPos, child.pair.open))
+        }
+        inner += emitNode(child)
+        lastPos = child.pair.close + child.pair.dlen
+      }
+      if (lastPos < innerEnd) {
+        inner += escapeHtml(s.slice(lastPos, innerEnd))
+      }
+
+      return `<${node.pair.tag}>${inner}</${node.pair.tag}>`
+    }
+
+    function emitRoots(nodeList: Node[], startText: number, endText: number): string {
+      let result = ''
+      let lastPos = startText
+
+      for (const node of nodeList) {
+        // Plain text before this node
+        if (node.pair.open > lastPos) {
+          result += escapeHtml(s.slice(lastPos, node.pair.open))
+        }
+        result += emitNode(node)
+        lastPos = node.pair.close + node.pair.dlen
+      }
+      if (lastPos < endText) {
+        result += escapeHtml(s.slice(lastPos, endText))
+      }
+      return result
+    }
+
+    let result = emitRoots(roots, 0, s.length)
+
+    // 7. Restore inline code
+    for (let i = 0; i < codeBlocks.length; i++) {
+      result = result.replace(`\x00C${i}\x00`, `<code>${codeBlocks[i]}</code>`)
+    }
+    return result
+  }
+
+  function handleListLine(line: string): boolean {
+    const listMatch = line.match(/^(\s*)[-*]\s(.*)/)
+    if (!listMatch) return false
+
+    const newDepth = indentDepth(line)
+    if (!inList) {
+      inList = true
+      listDepth = newDepth
+      out.push('<ul>')
+    } else if (newDepth > listDepth) {
+      // Jump deeper: open intermediate levels with empty items
+      while (newDepth > listDepth) {
+        out.push('<ul>')
+        listDepth++
+      }
+    } else if (newDepth < listDepth) {
+      while (newDepth < listDepth) {
+        out.push('</ul>')
+        listDepth--
+      }
+    }
+    const bullet = LIST_BULLETS[Math.min(listDepth, LIST_BULLETS.length - 1)]
+    const content = convertInline(listMatch[2])
+    out.push(`<li>${bullet} ${content}</li>`)
+    return true
+  }
+
+  for (const line of lines) {
+    // Code block
+    if (line.startsWith('```')) {
+      if (inCodeBlock) {
+        const code = escapeHtml(codeBlockLines.join('\n'))
+        out.push('<pre>' + code + '</pre>')
+        codeBlockLines = []
+        inCodeBlock = false
+      } else {
+        closeList()
+        inCodeBlock = true
+      }
+      continue
+    }
+    if (inCodeBlock) {
+      codeBlockLines.push(line)
+      continue
+    }
+
+    // List items
+    if (handleListLine(line)) continue
+
+    closeList()
+
+    // Empty line
+    if (line.trim() === '') {
+      out.push('')
+      continue
+    }
+
+    // Regular line
+    out.push(convertInline(line))
+  }
+
+  if (inCodeBlock) {
+    const code = escapeHtml(codeBlockLines.join('\n'))
+    out.push('<pre>' + code + '</pre>')
+  }
+  closeList()
+
+  return out.join('\n')
+}
+
 const MAX_CHUNK_LIMIT = 4096
 
 function chunkText(text: string, limit: number): string[] {
@@ -250,6 +495,7 @@ async function sendReply(chat_id: string, text: string, reply_to?: string, files
   // Send files first as media group or individual messages
   const ids: number[] = []
   const parseMode: 'HTML' | undefined = format !== 'text' ? 'HTML' : undefined
+  const body = format === 'markdown' ? mdToHtml(text) : text
 
   if (files && files.length > 0) {
     for (const filePath of files) {
@@ -259,14 +505,14 @@ async function sendReply(chat_id: string, text: string, reply_to?: string, files
           const isPhoto = ['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)
           if (isPhoto) {
             const sent = await bot.api.sendPhoto(chat_id, new InputFile(filePath), {
-              caption: ids.length === 0 ? text : undefined,
+              caption: ids.length === 0 ? body : undefined,
               ...(ids.length === 0 && reply_to ? { reply_parameters: { message_id: Number(reply_to) } } : {}),
               ...(parseMode && ids.length === 0 ? { parse_mode: parseMode } : {}),
             })
             ids.push(sent.message_id)
           } else {
             const sent = await bot.api.sendDocument(chat_id, new InputFile(filePath), {
-              caption: ids.length === 0 ? text : undefined,
+              caption: ids.length === 0 ? body : undefined,
               ...(ids.length === 0 && reply_to ? { reply_parameters: { message_id: Number(reply_to) } } : {}),
               ...(parseMode && ids.length === 0 ? { parse_mode: parseMode } : {}),
             })
@@ -278,12 +524,12 @@ async function sendReply(chat_id: string, text: string, reply_to?: string, files
       }
     }
     // If files were sent and text was included with the first file, we're done
-    if (ids.length > 0 && text) return ids
+    if (ids.length > 0 && body) return ids
   }
 
   // Send text chunks if not already sent with files
-  if (!files || files.length === 0 || !text) {
-    const chunks = chunkText(text, MAX_CHUNK_LIMIT)
+  if (!files || files.length === 0 || !body) {
+    const chunks = chunkText(body, MAX_CHUNK_LIMIT)
     for (let i = 0; i < chunks.length; i++) {
       const sent = await bot.api.sendMessage(chat_id, chunks[i], {
         ...(reply_to && i === 0 ? { reply_parameters: { message_id: Number(reply_to) } } : {}),
@@ -367,10 +613,10 @@ async function handleSocketMessage(
 ): Promise<void> {
   switch (msg.type) {
     case 'register': {
-      // Reject "ghost" clients: channelReady is true only when the client
+      // Reject "ghost" clients: channelEnabled is true only when the client
       // detects that Claude was launched with --channels/--dangerously-load-development-channels
       // containing "tgchannel" (via inspecting Claude's CLI args).
-      if (msg.channelReady !== true) {
+      if (msg.channelEnabled !== true) {
         log('register rejected (channel not ready):', msg.sessionId)
         socket.write(JSON.stringify({ type: 'rejected', reason: 'channel not ready' }) + '\n')
         break
@@ -589,6 +835,13 @@ async function handleInbound(ctx: any, text: string, meta: Record<string, string
 
   // Send typing indicator
   void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
+
+  // Ack reaction — gives user visual feedback that the message was received
+  if (msgId) {
+    void bot.api.setMessageReaction(chat_id, msgId, [
+      { type: 'emoji', emoji: '👀' },
+    ]).catch(() => {})
+  }
 
   // Forward to active instance
   const activeId = store.getActive()

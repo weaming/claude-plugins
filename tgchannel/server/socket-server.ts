@@ -6,7 +6,7 @@ import { createServer, type Socket } from 'net'
 import type { Instance } from './session-store.js'
 
 export type SocketMessage =
-  | { type: 'register'; sessionId: string; pid: number; label: string; lastMessage: string; cwd: string; channelReady?: boolean }
+  | { type: 'register'; sessionId: string; pid: number; label: string; lastMessage: string; cwd: string; channelEnabled?: boolean }
   | { type: 'unregister'; sessionId: string }
   | { type: 'switch'; toSessionId: string }
   | { type: 'update_last_message'; sessionId: string; message: string }
